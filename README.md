@@ -19,7 +19,10 @@ server treats a refusal as routing information, not as an answer:
 - Benched models **sit out** the next few requests (longest after a 429),
   counted on a logical request counter — never the wall clock — so behaviour
   is deterministic and replay-safe. While any ready model qualifies, cooling
-  models are not dialled at all.
+  models are not dialled at all. The sit-out **escalates**: consecutive
+  refusals from the same model lengthen its bench (a served request clears
+  the slate), and if every qualifier is benched the fallback order is
+  soonest-release first.
 - Every refusal along the way is reported on the final response in the
   `x-makefun-upstream-failures` header (a JSON array of
   `{"status","code","model"}` rows), so callers can see what the answer cost.

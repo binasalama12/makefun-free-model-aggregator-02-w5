@@ -221,6 +221,7 @@ async function dialWithFailover(
       continue;
     }
     if (response.ok && response.body !== null) {
+      sitOuts.forgive(dialId);
       return { kind: 'ok', response, dialId };
     }
     const text = await response.text().catch(() => '');

@@ -25,6 +25,7 @@ const SIT_OUT_NETWORK = 1;
 
 export class SitOutBook {
   private untilTick: Map<string, number> = new Map();
+  private strikes: Map<string, number> = new Map();
 
   /** Is this model sitting out at the given logical tick? */
   cooling(dialId: string, tick: number): boolean {
@@ -32,11 +33,31 @@ export class SitOutBook {
     return until !== undefined && tick < until;
   }
 
-  /** Bench a model after a refusal; `status` 0 means the call never landed. */
+  /** The tick at which a benched model becomes dialable again (0 if ready). */
+  releaseAt(dialId: string): number {
+    return this.untilTick.get(dialId) ?? 0;
+  }
+
+  /**
+   * Bench a model after a refusal; `status` 0 means the call never landed.
+   * Repeat offenders sit out longer: every consecutive refusal adds one
+   * extra request to the span (capped), because a model that just refused
+   * twice is a worse bet than one that refused once — the flat span of the
+   * first version kept re-offering chronic 429s the moment they expired.
+   */
   bench(dialId: string, tick: number, status: number): void {
-    const span = status === 429 ? SIT_OUT_RATE_LIMIT : status >= 500 ? SIT_OUT_SERVER_ERROR : SIT_OUT_NETWORK;
+    const base = status === 429 ? SIT_OUT_RATE_LIMIT : status >= 500 ? SIT_OUT_SERVER_ERROR : SIT_OUT_NETWORK;
+    const strike = (this.strikes.get(dialId) ?? 0) + 1;
+    this.strikes.set(dialId, strike);
+    const span = base + Math.min(strike - 1, 4);
     const prev = this.untilTick.get(dialId) ?? 0;
     this.untilTick.set(dialId, Math.max(prev, tick + span + 1));
+  }
+
+  /** A model that just served a request earns a clean slate. */
+  forgive(dialId: string): void {
+    this.strikes.delete(dialId);
+    this.untilTick.delete(dialId);
   }
 }
 
@@ -63,7 +84,13 @@ export function candidateQueue(
 ): FreeModel[] {
   const qualified = fleet.filter((m) => m.isFree && modelQualifies(m, needs)).sort(byMerit);
   const ready = qualified.filter((m) => !book.cooling(m.dialId, tick));
-  const queue = ready.length > 0 ? ready : qualified;
+  // Last resort when every qualifier is benched: soonest release first, so
+  // the fallback dials the model closest to being a fair bet again instead
+  // of blindly re-hitting the highest-rated (and longest-benched) one.
+  const queue =
+    ready.length > 0
+      ? ready
+      : [...qualified].sort((a, b) => book.releaseAt(a.dialId) - book.releaseAt(b.dialId) || byMerit(a, b));
   if (pinnedId !== null) {
     const at = queue.findIndex((m) => m.dialId === pinnedId);
     if (at > 0) {
